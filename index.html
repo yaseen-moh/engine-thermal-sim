@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Engine Thermal Simulator — Live Demo</title>
+<style>
+  body { margin:0; background:#0d1117; color:#e6e6f0; font-family: 'Segoe UI', system-ui, sans-serif; }
+  #wrap { max-width: 900px; margin:0 auto; padding:20px; }
+  h1 { font-size:1.3rem; margin-bottom:4px; }
+  p.sub { color:#9090a8; margin-top:0; font-size:0.9rem; }
+  canvas { background:#111726; border-radius:8px; display:block; margin:12px 0; }
+  .controls { display:grid; grid-template-columns: repeat(3, 1fr); gap:12px; margin-bottom:10px;}
+  label { font-size:0.8rem; color:#b0b0c8; display:flex; flex-direction:column; gap:4px;}
+  input[type=range]{ width:100%; }
+  #alert { font-size:0.85rem; padding:8px 12px; border-radius:6px; margin-top:8px; display:none;}
+  #alert.show { display:block; background:#4a1620; color:#ff9494; border:1px solid #ff4d4d; }
+  #ok { font-size:0.85rem; padding:8px 12px; border-radius:6px; margin-top:8px; background:#12321f; color:#7fffb0; border:1px solid #2ecc71;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>Engine Thermal Regulation Simulator</h1>
+  <p class="sub">Lumped-capacitance thermal network: chamber wall → coolant loop → ambient. Drag sliders to simulate a failing coolant pump live.</p>
+
+  <div class="controls">
+    <label>Combustion heat (kW): <span id="heatVal">15</span>
+      <input type="range" id="heat" min="5" max="30" value="15"></label>
+    <label>Coolant heat-rejection (W/K): <span id="condVal">40</span>
+      <input type="range" id="cond" min="0" max="80" value="40"></label>
+    <label>Burn duration (s): <span id="durVal">20</span>
+      <input type="range" id="dur" min="10" max="120" value="20"></label>
+  </div>
+  <canvas id="c" width="860" height="380"></canvas>
+  <div id="alert"></div>
+  <div id="ok" style="display:none"></div>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const chamberMass=0.8, chamberCp=460, chamberCap=chamberMass*chamberCp;
+const coolantMass=1.5, coolantCp=4180, coolantCap=coolantMass*coolantCp;
+const linkCond = 25.0;
+const ambientT = 293.15;
+const chamberLimit = 1200.0;
+const coolantLimit = 370.0;
+
+function simulate(heatKW, ambientCond, duration){
+  const dt=0.05, tEnd=120;
+  let Tc=293.15, Tco=293.15, t=0;
+  const series=[];
+  let alert=null;
+  while(t<=tEnd){
+    const q = t<duration ? heatKW*1000 : 0;
+    const dTc = (q - linkCond*(Tc-Tco)) / chamberCap;
+    const dTco = (linkCond*(Tc-Tco) + ambientCond*(ambientT-Tco)) / coolantCap;
+    Tc += dTc*dt;
+    Tco += dTco*dt;
+    series.push([t, Tc, Tco]);
+    if(!alert && Tco > coolantLimit) alert = {t, node:'coolant', temp:Tco};
+    if(!alert && Tc > chamberLimit) alert = {t, node:'chamber wall', temp:Tc};
+    t += dt;
+  }
+  return {series, alert};
+}
+
+function draw(result){
+  ctx.fillStyle='#111726';
+  ctx.fillRect(0,0,W,H);
+  const pad=45;
+  const allTemps = result.series.flatMap(p=>[p[1],p[2]]);
+  const maxT = Math.max(...allTemps, chamberLimit)*1.05;
+  const minT = 280;
+  const maxTime = result.series[result.series.length-1][0];
+  const sx = (W-2*pad)/maxTime;
+  const sy = (H-2*pad)/(maxT-minT);
+
+  function toPx(t,temp){ return [pad+t*sx, H-pad-(temp-minT)*sy]; }
+
+  // limit lines
+  [[chamberLimit,'#ff6b6b','chamber limit'],[coolantLimit,'#feca57','coolant limit']].forEach(([lim,color,label])=>{
+    const [x0,y0]=toPx(0,lim), [x1,y1]=toPx(maxTime,lim);
+    ctx.strokeStyle=color; ctx.setLineDash([5,4]); ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle=color; ctx.font='10px sans-serif';
+    ctx.fillText(label, x1-70, y1-4);
+  });
+
+  function plotLine(idx, color, label){
+    ctx.beginPath();
+    ctx.strokeStyle=color; ctx.lineWidth=2;
+    result.series.forEach(([t,Tc,Tco], i)=>{
+      const val = idx===1?Tc:Tco;
+      const [px,py] = toPx(t,val);
+      if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+    });
+    ctx.stroke();
+  }
+  plotLine(1, '#7fffd4', 'chamber wall');
+  plotLine(2, '#5aa9ff', 'coolant');
+
+  ctx.fillStyle='#7fffd4'; ctx.font='12px sans-serif';
+  ctx.fillText('● chamber wall', pad, 20);
+  ctx.fillStyle='#5aa9ff';
+  ctx.fillText('● coolant', pad+110, 20);
+
+  if(result.alert){
+    const [px,py] = toPx(result.alert.t, result.alert.temp);
+    ctx.fillStyle='#ff4d4d';
+    ctx.beginPath(); ctx.arc(px,py,5,0,Math.PI*2); ctx.fill();
+  }
+}
+
+function run(){
+  const heat = +document.getElementById('heat').value;
+  const cond = +document.getElementById('cond').value;
+  const dur = +document.getElementById('dur').value;
+  document.getElementById('heatVal').textContent = heat;
+  document.getElementById('condVal').textContent = cond;
+  document.getElementById('durVal').textContent = dur;
+
+  const result = simulate(heat, cond, dur);
+  draw(result);
+
+  const alertBox = document.getElementById('alert');
+  const okBox = document.getElementById('ok');
+  if(result.alert){
+    alertBox.className='show';
+    alertBox.textContent = `⚠ Overheat detected: ${result.alert.node} exceeded its safe limit at t=${result.alert.t.toFixed(1)}s (${result.alert.temp.toFixed(0)} K)`;
+    okBox.style.display='none';
+  } else {
+    alertBox.className='';
+    okBox.style.display='block';
+    okBox.textContent = '✓ No overheat: all nodes stayed within safe limits.';
+  }
+}
+
+['heat','cond','dur'].forEach(id=>document.getElementById(id).addEventListener('input', run));
+run();
+</script>
+</body>
+</html>
