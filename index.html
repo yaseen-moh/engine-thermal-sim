@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Engine Thermal Simulator — Live Demo</title>
+<style>
+  body { margin:0; background:#0d1117; color:#e6e6f0; font-family: 'Segoe UI', system-ui, sans-serif; }
+  #wrap { max-width: 960px; margin:0 auto; padding:20px; }
+  h1 { font-size:1.3rem; margin-bottom:4px; }
+  h2 { font-size:0.95rem; margin:18px 0 6px; color:#c8c8e0; }
+  p.sub { color:#9090a8; margin-top:0; font-size:0.9rem; }
+  canvas { background:#111726; border-radius:8px; display:block; margin:12px 0; }
+  .controls { display:grid; grid-template-columns: repeat(4, 1fr); gap:12px 16px; margin-bottom:6px;}
+  label { font-size:0.78rem; color:#b0b0c8; display:flex; flex-direction:column; gap:4px;}
+  input[type=range]{ width:100%; }
+  select { background:#1c2333; color:#e6e6f0; border:1px solid #3a3a5c; padding:6px 8px; border-radius:6px; font-size:0.8rem;}
+  #alert { font-size:0.85rem; padding:8px 12px; border-radius:6px; margin-top:8px; display:none;}
+  #alert.show { display:block; background:#4a1620; color:#ff9494; border:1px solid #ff4d4d; }
+  #ok { font-size:0.85rem; padding:8px 12px; border-radius:6px; margin-top:8px; background:#12321f; color:#7fffb0; border:1px solid #2ecc71;}
+  .section { background:#151b28; padding:12px 14px; border-radius:8px; margin-bottom:12px; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>Engine Thermal Regulation Simulator</h1>
+  <p class="sub">Lumped-capacitance thermal network: chamber wall → coolant loop → ambient. Everything below redraws live.</p>
+
+  <div class="section">
+    <h2>Chamber wall</h2>
+    <div class="controls">
+      <label>Material
+        <select id="material">
+          <option value="steel" selected>Steel (Cp≈490 J/kgK)</option>
+          <option value="aluminum">Aluminum (Cp≈897 J/kgK)</option>
+          <option value="copper">Copper (Cp≈385 J/kgK)</option>
+        </select>
+      </label>
+      <label>Chamber mass (kg): <span id="chamberMassVal">0.8</span>
+        <input type="range" id="chamberMass" min="20" max="300" value="80"></label>
+      <label>Chamber safe limit (K): <span id="chamberLimitVal">1200</span>
+        <input type="range" id="chamberLimit" min="600" max="2000" step="50" value="1200"></label>
+      <label>Combustion heat (kW): <span id="heatVal">15</span>
+        <input type="range" id="heat" min="5" max="30" value="15"></label>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Coolant loop</h2>
+    <div class="controls">
+      <label>Coolant mass (kg): <span id="coolantMassVal">1.5</span>
+        <input type="range" id="coolantMass" min="20" max="300" value="150"></label>
+      <label>Coolant safe limit (K): <span id="coolantLimitVal">370</span>
+        <input type="range" id="coolantLimit" min="320" max="450" value="370"></label>
+      <label>Heat-rejection rate (W/K): <span id="condVal">40</span>
+        <input type="range" id="cond" min="0" max="80" value="40"></label>
+      <label>Ambient temperature (K): <span id="ambientVal">293</span>
+        <input type="range" id="ambient" min="250" max="330" value="293"></label>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Heat profile</h2>
+    <div class="controls">
+      <label>Profile
+        <select id="profile">
+          <option value="constant" selected>Constant burn</option>
+          <option value="pulsed">Pulsed (on/off cycling)</option>
+          <option value="ramp">Ramp-up burn</option>
+        </select>
+      </label>
+      <label>Burn duration (s): <span id="durVal">20</span>
+        <input type="range" id="dur" min="10" max="120" value="20"></label>
+    </div>
+  </div>
+
+  <canvas id="c" width="900" height="380"></canvas>
+  <div id="alert"></div>
+  <div id="ok" style="display:none"></div>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const SPECIFIC_HEAT = { steel: 490, aluminum: 897, copper: 385 };
+const linkCond = 25.0;
+
+function heatProfile(profile, heatKW, duration, t){
+  if(t>=duration) return 0;
+  const peak = heatKW*1000;
+  if(profile==='constant') return peak;
+  if(profile==='ramp') return peak*Math.min(1, t/(duration*0.4));
+  if(profile==='pulsed'){
+    const cyclePos = (t % 4);
+    return cyclePos < 2 ? peak : 0;
+  }
+  return peak;
+}
+
+function simulate(cfg){
+  const { material, chamberMassKg, chamberLimit, heatKW, coolantMassKg, coolantLimit,
+          ambientCond, ambientTempK, profile, duration } = cfg;
+
+  const chamberCp = SPECIFIC_HEAT[material];
+  const chamberCap = chamberMassKg*chamberCp;
+  const coolantCp = 4180; // water, coolant loop assumed water-based
+  const coolantCap = coolantMassKg*coolantCp;
+
+  const dt=0.05, tEnd=Math.max(120, duration*1.5);
+  let Tc=ambientTempK, Tco=ambientTempK, t=0;
+  const series=[];
+  let alert=null;
+
+  while(t<=tEnd){
+    const q = heatProfile(profile, heatKW, duration, t);
+    const dTc = (q - linkCond*(Tc-Tco)) / chamberCap;
+    const dTco = (linkCond*(Tc-Tco) + ambientCond*(ambientTempK-Tco)) / coolantCap;
+    Tc += dTc*dt;
+    Tco += dTco*dt;
+    series.push([t, Tc, Tco]);
+    if(!alert && Tco > coolantLimit) alert = {t, node:'coolant', temp:Tco};
+    if(!alert && Tc > chamberLimit) alert = {t, node:'chamber wall', temp:Tc};
+    t += dt;
+  }
+  return { series, alert };
+}
+
+function draw(result, chamberLimit, coolantLimit){
+  ctx.fillStyle='#111726';
+  ctx.fillRect(0,0,W,H);
+  const pad=45;
+  const allTemps = result.series.flatMap(p=>[p[1],p[2]]);
+  const maxT = Math.max(...allTemps, chamberLimit)*1.05;
+  const minT = Math.min(...allTemps)*0.95;
+  const maxTime = result.series[result.series.length-1][0];
+  const sx = (W-2*pad)/maxTime;
+  const sy = (H-2*pad)/(maxT-minT);
+
+  function toPx(t,temp){ return [pad+t*sx, H-pad-(temp-minT)*sy]; }
+
+  [[chamberLimit,'#ff6b6b','chamber limit'],[coolantLimit,'#feca57','coolant limit']].forEach(([lim,color,label])=>{
+    const [x0,y0]=toPx(0,lim), [x1,y1]=toPx(maxTime,lim);
+    ctx.strokeStyle=color; ctx.setLineDash([5,4]); ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle=color; ctx.font='10px sans-serif';
+    ctx.fillText(label, x1-70, y1-4);
+  });
+
+  function plotLine(idx, color){
+    ctx.beginPath();
+    ctx.strokeStyle=color; ctx.lineWidth=2;
+    result.series.forEach(([t,Tc,Tco], i)=>{
+      const val = idx===1?Tc:Tco;
+      const [px,py] = toPx(t,val);
+      if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+    });
+    ctx.stroke();
+  }
+  plotLine(1, '#7fffd4');
+  plotLine(2, '#5aa9ff');
+
+  ctx.fillStyle='#7fffd4'; ctx.font='12px sans-serif';
+  ctx.fillText('● chamber wall', pad, 20);
+  ctx.fillStyle='#5aa9ff';
+  ctx.fillText('● coolant', pad+110, 20);
+
+  if(result.alert){
+    const [px,py] = toPx(result.alert.t, result.alert.temp);
+    ctx.fillStyle='#ff4d4d';
+    ctx.beginPath(); ctx.arc(px,py,5,0,Math.PI*2); ctx.fill();
+  }
+}
+
+function readConfig(){
+  const material = document.getElementById('material').value;
+  const chamberMassKg = +document.getElementById('chamberMass').value/100;
+  const chamberLimit = +document.getElementById('chamberLimit').value;
+  const heatKW = +document.getElementById('heat').value;
+  const coolantMassKg = +document.getElementById('coolantMass').value/100;
+  const coolantLimit = +document.getElementById('coolantLimit').value;
+  const ambientCond = +document.getElementById('cond').value;
+  const ambientTempK = +document.getElementById('ambient').value;
+  const profile = document.getElementById('profile').value;
+  const duration = +document.getElementById('dur').value;
+
+  document.getElementById('chamberMassVal').textContent = chamberMassKg.toFixed(2);
+  document.getElementById('chamberLimitVal').textContent = chamberLimit;
+  document.getElementById('heatVal').textContent = heatKW;
+  document.getElementById('coolantMassVal').textContent = coolantMassKg.toFixed(2);
+  document.getElementById('coolantLimitVal').textContent = coolantLimit;
+  document.getElementById('condVal').textContent = ambientCond;
+  document.getElementById('ambientVal').textContent = ambientTempK;
+  document.getElementById('durVal').textContent = duration;
+
+  return { material, chamberMassKg, chamberLimit, heatKW, coolantMassKg, coolantLimit,
+           ambientCond, ambientTempK, profile, duration };
+}
+
+function run(){
+  const cfg = readConfig();
+  const result = simulate(cfg);
+  draw(result, cfg.chamberLimit, cfg.coolantLimit);
+
+  const alertBox = document.getElementById('alert');
+  const okBox = document.getElementById('ok');
+  if(result.alert){
+    alertBox.className='show';
+    alertBox.textContent = `⚠ Overheat detected: ${result.alert.node} exceeded its safe limit at t=${result.alert.t.toFixed(1)}s (${result.alert.temp.toFixed(0)} K)`;
+    okBox.style.display='none';
+  } else {
+    alertBox.className='';
+    okBox.style.display='block';
+    okBox.textContent = '✓ No overheat: all nodes stayed within safe limits.';
+  }
+}
+
+['chamberMass','chamberLimit','heat','coolantMass','coolantLimit','cond','ambient','dur'].forEach(id=>{
+  document.getElementById(id).addEventListener('input', run);
+});
+['material','profile'].forEach(id=>{
+  document.getElementById(id).addEventListener('change', run);
+});
+
+run();
+</script>
+</body>
+</html>
